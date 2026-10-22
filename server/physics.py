@@ -35,7 +35,7 @@ class PhysicsWorld:
         ceiling_shape = pymunk.Segment(ceiling_body, (0,0), (WORLD_WIDTH, 0), 20)
         self.space.add(ceiling_body, ceiling_shape)
 
-    def add_box(self, obj_id, x, y, window_type="box", content=None, width=20, height=20):
+    def add_box(self, obj_id, x, y, window_type="box", content=None, width=150, height= 150):
         new_body = pymunk.Body(body_type=pymunk.Body.KINEMATIC)
         new_body.position = (x, y)
         hw, hh = width / 2, height / 2
@@ -58,6 +58,9 @@ class PhysicsWorld:
             clamped_y = max(half_h, min(WORLD_HEIGHT - half_h, y))
             self.bodies[obj_id].position = (clamped_x, clamped_y)
 
+    def bring_to_front(self, obj_id):
+        if obj_id in self.bodies:
+            self.bodies[obj_id] = self.bodies.pop(obj_id)
 
     def step(self, dt):
         substeps = 4
@@ -104,16 +107,17 @@ class PhysicsWorld:
 
         return stateDict
     
-    def get_body_at(self, x , y):
-        found = self.space.point_query_nearest((x,y) , 10, pymunk.ShapeFilter())
-        print(f"query result: {found}")
-        if found is None:
+    def get_body_at(self, x, y, reach=30):
+        hits = []
+        for q in self.space.point_query((x, y), reach, pymunk.ShapeFilter()):
+            for order, (obj_id, body) in enumerate(self.bodies.items()):
+                if body is q.shape.body:
+                    inside = q.distance <= 0
+                    is_overlay = self.types[obj_id] != "box"
+                    hits.append(((inside, is_overlay, order), obj_id))
+        if not hits:
             return None
-        target_body = found.shape.body
-        for obj_id, body in self.bodies.items():
-            if body is target_body:
-                return obj_id
-        return None
+        return max(hits)[1]
 
     def remove_box(self, obj_id):
         if obj_id in self.bodies:

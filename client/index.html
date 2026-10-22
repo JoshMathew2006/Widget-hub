@@ -7,6 +7,42 @@
     <meta charset="UTF-8">
     <style>
 
+        .input-toggle {
+            --toggle: #00E5FF;
+            position: relative;
+            display: flex;
+            width: 100%;
+            border: 1px solid var(--toggle);
+            border-radius: 999px;
+            box-shadow: 0 0 8px color-mix(in srgb, var(--toggle) 30%, transparent);
+            overflow: hidden;
+        }
+        .input-toggle button {
+            position: relative;
+            z-index: 1;
+            flex: 1;
+            background: transparent;
+            border: none;
+            color: var(--toggle);
+            padding: 6px 0;
+            font-family: 'Andromeda', sans-serif;
+            font-size: 14px;
+            cursor: pointer;
+            transition: color 0.2s;
+        }
+        .input-toggle button.active { color: #000; }
+        .input-toggle-thumb {
+            position: absolute;
+            top: 0; bottom: 0; left: 0;
+            width: 50%;
+            background: var(--toggle);
+            box-shadow: 0 0 12px var(--toggle);
+            border-radius: 999px;
+            transition: transform 0.25s ease;
+        }
+        .input-toggle.hand .input-toggle-thumb { transform: translateX(100%); }
+
+
         @font-face {
             font-family: 'Andromeda';
             src: url('fonts/Andromeda-eR2n.ttf') format('truetype');
@@ -31,6 +67,180 @@
             border-radius: 10px;
             border: 3px solid transparent;
             background-clip: padding-box;
+        }
+
+        /* Hand-tracking feedback */
+        .gesture-hover {
+            filter: brightness(1.35) drop-shadow(0 0 6px currentColor);
+        }
+        #gestureCursorEl {
+            transition: transform 0.12s ease, background-color 0.12s ease;
+        }
+        #gestureCursorEl.click {
+            transform: scale(0.6);
+            background-color: rgba(255, 255, 255, 0.45);
+        }
+
+        /* ---------- Radial add menu ---------- */
+        #widgetPicker { display: none !important; }   /* old picker, replaced by the hub */
+
+        #dim {
+            position: fixed; inset: 0;
+            background: rgba(0, 0, 0, 0.7);
+            opacity: 0; pointer-events: none;
+            transition: opacity 0.2s ease;
+            z-index: 5;
+        }
+        .hub-open #dim, .trash-active #dim { opacity: 1; }
+
+        #hub {
+            --hub: #00E5FF;
+            --bubble-w: 190px;
+            --bubble-h: 92px;
+            --gap: 36px;
+            --bubble-bg: color-mix(in srgb, var(--hub-bg, #000) 85%, transparent);  
+            --rx: calc((var(--bubble-w) + var(--gap)) / 0.7071);
+            --ry: calc((var(--bubble-h) + var(--gap)) / 0.7071);
+            position: fixed; left: 50%; top: 50%;
+            width: 0; height: 0;
+            z-index: 8;
+            pointer-events: none;
+        }
+        #hubCenter {
+            position: absolute; left: 0; top: 0;
+            width: 120px; height: 120px;
+            transform: translate(-50%, -50%);
+        }
+
+        #hubOctagon {
+            width: 100%; height: 100%;
+            overflow: visible; pointer-events: none;
+            filter: drop-shadow(0 0 3px var(--hub));
+            transition: transform 0.2s ease;
+        }
+        .hub-open #hubOctagon { transform: scale(1.08); }
+                #hubOctagon .outer { fill: var(--hub-bg, #000); stroke: var(--hub); stroke-width: 4;   stroke-dasharray: 7 3; }
+        #hubOctagon .inner { fill: none;                stroke: var(--hub); stroke-width: 1.5; stroke-dasharray: 9 3.5; opacity: 0.7; }
+        #hubOctagon .plus  { fill: none; stroke: var(--hub-plus, #000); stroke-width: 6; stroke-linecap: square; }
+
+        #hubOctagon .outer,
+        #hubOctagon .inner {
+            transform-box: fill-box;
+            transform-origin: center;
+        }
+        #hubOctagon .outer { animation: hubSpin 30s linear infinite; }
+        #hubOctagon .inner { animation: hubSpin 20s linear infinite reverse; }
+        @keyframes hubSpin { to { transform: rotate(360deg); } }
+        @media (prefers-reduced-motion: reduce) {
+            #hubOctagon .outer, #hubOctagon .inner { animation: none; }
+        }
+
+        #hubCore {
+            position: absolute; left: 50%; top: 50%;
+            width: 40px; height: 40px;                   /* 20px radius */
+            transform: translate(-50%, -50%);
+            border-radius: 50%;
+            background: var(--hub);                      /* follows the Buttons color */
+            box-shadow: 0 0 2px var(--hub), 0 0 6px var(--hub);
+            pointer-events: none;
+        }
+        
+
+        .hub-bubble {
+            --s: 0.4;
+            --a: calc(var(--i) * 45deg - 90deg);
+            position: absolute; left: 0; top: 0;
+            width: var(--bubble-w); height: var(--bubble-h);
+            transform: translate(-50%, -50%)
+                       translate(calc(cos(var(--a)) * var(--rx)), calc(sin(var(--a)) * var(--ry)))
+                       scale(var(--s));
+            background: var(--bubble-bg);
+            border: 2px solid var(--hub);
+            border-radius: 24px;
+            color: var(--hub);
+            font-family: 'Andromeda', sans-serif; font-size: 30px;
+            text-shadow: 0 0 6px var(--hub);
+            box-shadow: 0 0 12px var(--hub);
+            cursor: pointer;
+            opacity: 0; pointer-events: none;
+            transition: transform 0.2s ease, opacity 0.2s ease, background 0.15s;
+        }
+        .hub-open .hub-bubble { --s: 1; opacity: 1; pointer-events: auto; }
+        .hub-open .hub-bubble:hover,
+        .hub-open .hub-bubble.gesture-hover {
+            --s: 1.1;
+            background: color-mix(in srgb, var(--hub) 20%, var(--bubble-bg));
+        }
+        .hub-open .hub-bubble:disabled { opacity: 0.3; cursor: default; }
+        .hub-open .hub-bubble:disabled:hover,
+        .hub-open .hub-bubble:disabled.gesture-hover { --s: 1; filter: none; background: var(--bubble-bg); }
+
+        /* ---------- Trash zone ---------- */
+        #trash {
+            --trash: #00E5FF;
+            position: fixed; right: 0; top: 0;
+            width: 0; height: 0;
+            z-index: 8;
+            pointer-events: none;
+        }
+        #trashZone {
+            position: absolute;
+            right: calc(var(--trash-r) * -1);
+            top: calc(var(--trash-r) * -1);
+            width: calc(var(--trash-r) * 2);
+            height: calc(var(--trash-r) * 2);
+            border-radius: 50%;
+            border: 2px solid var(--trash);
+            background: color-mix(in srgb, var(--trash) 8%, transparent);
+            box-shadow: 0 0 6px var(--trash);
+            transform: scale(0);          /* grows out of the corner */
+            opacity: 0;
+            transition: transform 0.35s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.2s ease;
+        }
+        .trash-active #trashZone { transform: scale(1); opacity: 1; }
+
+                /* progress bar along the zone's curved edge */
+        #trashBar {
+            position: absolute; right: 0; top: 0;
+            width: var(--trash-r); height: var(--trash-r);
+            overflow: visible;
+            opacity: 0;
+            transition: opacity 0.2s ease;
+        }
+        .trash-active #trashBar { opacity: 1; }
+        #trashBar path {
+            fill: none;
+            stroke: var(--trash);
+            stroke-width: 1.8;               
+            stroke-linecap: round;
+        }
+        #trashBar .track { opacity: 0.2; }
+        #trashBar .fill  { filter: drop-shadow(0 0 4px var(--trash)); }
+
+        #trashIcon {
+            position: absolute;
+            right: 24px; top: 24px;
+            width: 40px; height: 40px;
+            color: var(--trash);
+            opacity: 0.55;
+            transition: right 0.3s ease, top 0.3s ease, width 0.3s ease, height 0.3s ease, opacity 0.2s ease;
+        }
+
+        .trash-active #trashIcon {
+            --icon: 110px;
+            right: calc(var(--trash-r) * 0.32 - var(--icon) / 2);
+            top:   calc(var(--trash-r) * 0.32 - var(--icon) / 2);
+            width: var(--icon); height: var(--icon);
+            opacity: 1;
+            animation: trashPulse 0.9s ease-in-out infinite;
+        }
+       
+        @keyframes trashPulse {
+            0%, 100% { filter: drop-shadow(0 0 2px var(--trash)); }
+            50%      { filter: drop-shadow(0 0 10px var(--trash)); }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            .trash-active #trashIcon { animation: none; filter: drop-shadow(0 0 4px var(--trash)); }
         }
 
     </style>
@@ -78,6 +288,13 @@
 
         <p style="color:white; margin: 4px 0; font-size: 20px; font-family:'Andromeda', sans-serif; letter-spacing: 1px; text-transform: uppercase;">Buttons</p>
         <div id="buttonColorPicker" style="margin-bottom: 16px;"></div>
+        <p style="color:white; margin: 4px 0; font-size: 20px; font-family:'Andromeda', sans-serif; letter-spacing: 1px; text-transform: uppercase;">Input</p>
+        <div id="inputToggle" class="input-toggle" role="radiogroup" aria-label="Input mode">
+            <button type="button" data-mode="mouse" class="active" role="radio" aria-checked="true">Mouse</button>
+            <button type="button" data-mode="hand" role="radio" aria-checked="false">Hand</button>
+            <span class="input-toggle-thumb"></span>
+        </div>
+        <p id="inputStatus" style="color:#00E5FF99; margin: 6px 0 0; font-size: 11px; font-family:'Chakra Petch', sans-serif; text-align:center; min-height: 14px;"></p>
     </div>
 
     <div id="widgetPicker" style="
@@ -118,7 +335,39 @@
         display: none;
     ">
     </div>
-
+    <div id="dim"></div>
+    <div id="hub" data-gesture-surface>
+        <div id="hubBubbles">
+            <button class="hub-bubble" style="--i:0" data-type="chat">Chat</button>
+            <button class="hub-bubble" style="--i:1" data-type="note">Notes</button>
+            <button class="hub-bubble" style="--i:2" data-type="box">Box</button>
+            <button class="hub-bubble" style="--i:3" data-type="weather">Weather</button>
+            <button class="hub-bubble" style="--i:4" disabled></button>
+            <button class="hub-bubble" style="--i:5" disabled></button>
+            <button class="hub-bubble" style="--i:6" disabled></button>
+            <button class="hub-bubble" style="--i:7" disabled></button>
+        </div>
+        <div id="hubCenter">
+            <svg id="hubOctagon" viewBox="0 0 100 100">
+                <circle class="outer" cx="50" cy="50" r="45" pathLength="100"/>
+                <circle class="inner" cx="50" cy="50" r="33" pathLength="100"/>
+            </svg>
+            <div id="hubCore"></div>
+        </div>
+    </div>
+    <div id="trash">
+        <div id="trashZone"></div>
+        <svg id="trashBar" viewBox="0 0 100 100">
+            <path class="track" d="M0 0 A100 100 0 0 0 100 100"/>
+            <path class="fill"  d="M0 0 A100 100 0 0 0 100 100" pathLength="100" stroke-dasharray="0 100"/>
+        </svg>
+        <svg id="trashIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 7h16"/>
+            <path d="M9 7V4.5h6V7"/>
+            <path d="M6 7l1 13h10l1-13"/>
+            <path d="M10 11v6M14 11v6"/>
+        </svg>
+    </div>
     <script src="https://cdn.jsdelivr.net/npm/@jaames/iro@5"></script>
     <script src="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.js"></script>
     <script type = "module" src="client.js"></script>
