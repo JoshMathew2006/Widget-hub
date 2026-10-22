@@ -939,6 +939,11 @@ function handleMessage(event) {
         draggingId = data.obj_id;
         selectedId = data.obj_id;
     }
+    else if (data.type === "theme") {
+        bgPicker.color.hexString = data.bg;
+        bodyPicker.color.hexString = data.body;
+        buttonPicker.color.hexString = data.button;
+    }
     
     
 }
@@ -991,6 +996,19 @@ function raiseWidget(id) {
     const entry = noteEditors[id] || chatEditors[id] || weatherEditors[id];
     const container = document.getElementById("noteContainer");
     if (entry && container.lastElementChild !== entry.wrapper) container.appendChild(entry.wrapper);
+}
+
+// Only touch the page when a widget actually moved or resized (or the window did).
+// Writing the same styles every frame still makes the browser re-check the layout.
+function placeWidget(entry, obj) {
+    const key = `${obj.x},${obj.y},${obj.size[0]},${obj.size[1]},${canvas.width},${canvas.height}`;
+    if (entry.lastPlace === key) return;
+    const pos = worldToScreen(obj.x - obj.size[0] / 2, obj.y - obj.size[1] / 2);
+    entry.wrapper.style.left = `${pos.left}px`;
+    entry.wrapper.style.top = `${pos.top}px`;
+    entry.wrapper.style.width = `${obj.size[0] * getScaleX()}px`;
+    entry.wrapper.style.height = `${obj.size[1] * getScaleY()}px`;
+    entry.lastPlace = key;
 }
 
 function draw() {
@@ -1126,21 +1144,9 @@ function draw() {
         ctx.restore();
 
         if (obj.type === "note") {
-            const quill = ensureNoteEditor(id);
+            ensureNoteEditor(id);
             const entry = noteEditors[id];
-            const pos = worldToScreen(obj.x - obj.size[0] / 2, obj.y - obj.size[1] / 2);
-
-            if (entry.lastX !== obj.x || entry.lastY !== obj.y || entry.lastW !== obj.size[0] || entry.lastH !== obj.size[1]) {
-                entry.wrapper.style.left = `${pos.left}px`;
-                entry.wrapper.style.top = `${pos.top}px`;
-                entry.wrapper.style.width = `${obj.size[0] * getScaleX()}px`;
-                entry.wrapper.style.height = `${obj.size[1] * getScaleY()}px`;
-                entry.lastX = obj.x;
-                entry.lastY = obj.y;
-                entry.lastW = obj.size[0];
-                entry.lastH = obj.size[1];
-            }
-
+            placeWidget(entry, obj);
             const outlineColor = (id === selectedId) ? "#FFFFFF" : (id === hoveredId ? bgColor : bodyColor);
             if (entry.lastOutline !== outlineColor) {
                 entry.wrapper.style.background = hexToRgba(bodyColor, 0.25);
@@ -1156,23 +1162,25 @@ function draw() {
 
         }
         else if (obj.type === "chat"){
+            
             const entry = ensureChatWindow(id);
-            const pos = worldToScreen(obj.x - obj.size[0] / 2, obj.y - obj.size[1] / 2);
-            entry.wrapper.style.left = `${pos.left}px`;
-            entry.wrapper.style.top = `${pos.top}px`;
-            entry.sendBtn.style.background = bodyColor;
-            entry.sendBtn.style.border = bodyColor;
-            entry.wrapper.style.width = `${obj.size[0] * getScaleX()}px`;
-            entry.wrapper.style.height = `${obj.size[1] * getScaleY()}px`;
+            placeWidget(entry, obj);
 
-            const textColor = getContrastingTextColor(bgColor);
-            Array.from(entry.messagesEl.children).forEach(bubble => {
-                if (bubble.className === "typing-indicator") return;
-                bubble.style.color = textColor;
-                if (bubble.dataset.role === "user") {
-                    bubble.style.background = hexToRgba(bodyColor, 0.4);
-                }
-            });
+            const colorKey = bodyColor + bgColor;
+            if (entry.lastColors !== colorKey) {          // only restyle when the theme changes
+                entry.sendBtn.style.background = bodyColor;
+                entry.sendBtn.style.border = bodyColor;
+                const textColor = getContrastingTextColor(bgColor);
+                Array.from(entry.messagesEl.children).forEach(bubble => {
+                    if (bubble.className === "typing-indicator") return;
+                    bubble.style.color = textColor;
+                    if (bubble.dataset.role === "user") {
+                        bubble.style.background = hexToRgba(bodyColor, 0.4);
+                    }
+                });
+                entry.lastColors = colorKey;
+                entry.lastOutline = null;                 // repaint the border with the new colors too
+            }
             
             const outlineColor = (id === selectedId) ? "#FFFFFF" : (id === hoveredId ? bgColor : bodyColor);
             if (entry.lastOutline !== outlineColor) {
@@ -1188,12 +1196,9 @@ function draw() {
             renderChatMessages(entry, obj.content);
         }
         else if (obj.type === "weather") {
+            
             const entry = ensureWeatherWidget(id);
-            const pos = worldToScreen(obj.x - obj.size[0] / 2, obj.y - obj.size[1] / 2);
-            entry.wrapper.style.left = `${pos.left}px`;
-            entry.wrapper.style.top = `${pos.top}px`;
-            entry.wrapper.style.width = `${obj.size[0] * getScaleX()}px`;
-            entry.wrapper.style.height = `${obj.size[1] * getScaleY()}px`;
+            placeWidget(entry, obj);
 
             const textColor = getContrastingTextColor(bgColor);
             if (entry.lastText !== textColor) {
@@ -1631,3 +1636,12 @@ setInputMode(inputMode);
 
 connect();
 draw();
+
+// tell the server when YOU change a color (input:end only fires for real drags,
+// so colors arriving from the server don't get echoed back)
+function sendTheme() {
+    ws.send(JSON.stringify({ type: "theme", bg: bgColor, body: bodyColor, button: buttonColor }));
+}
+bgPicker.on("input:end", sendTheme);
+bodyPicker.on("input:end", sendTheme);
+buttonPicker.on("input:end", sendTheme);
