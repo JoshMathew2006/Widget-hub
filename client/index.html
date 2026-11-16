@@ -64,7 +64,7 @@
         }
         .chat-scrollable::-webkit-scrollbar-thumb {
             background: #00E5FF;
-            border-radius: 10px;
+            border-radius: 8px;
             border: 3px solid transparent;
             background-clip: padding-box;
         }
@@ -119,7 +119,7 @@
             transition: transform 0.2s ease;
         }
         .hub-open #hubOctagon { transform: scale(1.08); }
-                #hubOctagon .outer { fill: var(--hub-bg, #000); stroke: var(--hub); stroke-width: 4;   stroke-dasharray: 7 3; }
+        #hubOctagon .outer { fill: var(--hub-bg, #000); stroke: var(--hub); stroke-width: 4;   stroke-dasharray: 7 3; }
         #hubOctagon .inner { fill: none;                stroke: var(--hub); stroke-width: 1.5; stroke-dasharray: 9 3.5; opacity: 0.7; }
         #hubOctagon .plus  { fill: none; stroke: var(--hub-plus, #000); stroke-width: 6; stroke-linecap: square; }
 
@@ -199,7 +199,7 @@
         }
         .trash-active #trashZone { transform: scale(1); opacity: 1; }
 
-                /* progress bar along the zone's curved edge */
+        /* progress bar along the zone's curved edge */
         #trashBar {
             position: absolute; right: 0; top: 0;
             width: var(--trash-r); height: var(--trash-r);
@@ -242,6 +242,56 @@
         @media (prefers-reduced-motion: reduce) {
             .trash-active #trashIcon { animation: none; filter: drop-shadow(0 0 4px var(--trash)); }
         }
+
+        /* ---------- Widget menu (point at a widget) ---------- */
+        #focusDim {
+            position: fixed; z-index: 4; pointer-events: none;
+            border-radius: 10px;
+            box-shadow: 0 0 0 200vmax rgba(0, 0, 0, 0.32);   /* darkens everything outside this box */
+            opacity: 0; transition: opacity 0.2s ease;
+        }
+        #focusDim.show { opacity: 1; }
+
+        #widgetMenu {
+            --line: #00E5FF; --btn: #00E5FF;
+            position: fixed; z-index: 6; width: 0; height: 0;
+            opacity: 0; transition: opacity 0.15s ease;
+        }
+        #widgetMenu.show { opacity: 1; }
+        .wm-row {
+            position: absolute; left: 0;
+            display: flex; align-items: center;
+            pointer-events: none;
+        }
+        #widgetMenu.show .wm-row { pointer-events: auto; }
+        #widgetMenu.flip .wm-row { flex-direction: row-reverse; transform: translateX(-100%); }   /* left side */
+        #wmLockRow   { top: 6px; }
+        #wmResizeRow { top: 108px}
+        .wm-line {
+            width: 32px; height: 2px;
+            background: var(--line); box-shadow: 0 0 6px var(--line);
+        }
+        .wm-btn {
+            appearance: none; font: inherit; line-height: 0;
+            width: 68px; height: 68px; padding: 16px;
+            box-sizing: border-box; border-radius: 50%;
+            border: 2px solid var(--btn);
+            background: color-mix(in srgb, var(--bg, #000) 68%, black);   /* page color under the 32% dim */
+            color: var(--btn);
+            box-shadow: 0 0 10px var(--btn);
+            cursor: pointer;
+            transition: transform 0.15s ease, opacity 0.15s ease;
+        }
+        .wm-btn.small { width: 44px; height: 44px; padding: 9px; cursor: nesw-resize; }
+        .wm-btn { position: relative; }
+        .wm-btn::after { content: ""; position: absolute; inset: -12px; border-radius: 50%; }   /* bigger hit area, invisible */
+        .wm-btn svg { width: 100%; height: 100%; pointer-events: none; }
+        .wm-btn:hover, .wm-btn.gesture-hover { transform: scale(1.12); }
+
+        #lockBtn .closed { display: none; }
+        #widgetMenu.locked #lockBtn .open   { display: none; }
+        #widgetMenu.locked #lockBtn .closed { display: block; }
+        #widgetMenu.locked #resizeHandle { opacity: 0.3; pointer-events: none; }
 
     </style>
 </head>
@@ -342,7 +392,7 @@
             <button class="hub-bubble" style="--i:1" data-type="note">Notes</button>
             <button class="hub-bubble" style="--i:2" data-type="box">Box</button>
             <button class="hub-bubble" style="--i:3" data-type="weather">Weather</button>
-            <button class="hub-bubble" style="--i:4" disabled></button>
+            <button class="hub-bubble" style="--i:4" data-type="spotify">Spotify</button>
             <button class="hub-bubble" style="--i:5" disabled></button>
             <button class="hub-bubble" style="--i:6" disabled></button>
             <button class="hub-bubble" style="--i:7" disabled></button>
@@ -368,6 +418,33 @@
             <path d="M10 11v6M14 11v6"/>
         </svg>
     </div>
+
+    <div id="focusDim"></div>
+    <div id="widgetMenu" data-gesture-surface>
+        <div class="wm-row" id="wmLockRow">
+            <span class="wm-line"></span>
+            <button id="lockBtn" class="wm-btn" type="button" aria-label="Lock widget">
+                <svg class="open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="5" y="11" width="14" height="10" rx="2.5"/>
+                    <path d="M8 11V7.5a4 4 0 0 1 7.6-1.8"/>
+                </svg>
+                <svg class="closed" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="5" y="11" width="14" height="10" rx="2.5"/>
+                    <path d="M8 11V7.5a4 4 0 0 1 8 0V11"/>
+                    <path d="M12 15.2v1.6"/>
+                </svg>
+            </button>
+        </div>
+        <div class="wm-row" id="wmResizeRow">
+            <span class="wm-line"></span>
+            <div id="resizeHandle" class="wm-btn small" data-gesture-drag>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M14 4h6v6M10 20H4v-6M20 4l-6.5 6.5M4 20l6.5-6.5"/>
+                </svg>
+            </div>
+        </div>
+    </div>
+
     <script src="https://cdn.jsdelivr.net/npm/@jaames/iro@5"></script>
     <script src="https://cdn.jsdelivr.net/npm/quill@2.0.2/dist/quill.js"></script>
     <script type = "module" src="client.js"></script>

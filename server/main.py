@@ -2,11 +2,13 @@ import asyncio
 import json
 from fastapi import FastAPI, WebSocket
 from .physics import PhysicsWorld, WORLD_WIDTH, WORLD_HEIGHT
+from . import spotify
 import httpx
 import os
 import re
 
 app = FastAPI()
+app.include_router(spotify.router)
 world = PhysicsWorld()
 clients = set()
 
@@ -129,6 +131,8 @@ async def handle_message(websocket, data):
             world.add_box(new_id, x, y, window_type="chat", content=[], width=190, height=260)
         elif chosen_type == "weather":
             world.add_box(new_id, x, y, window_type="weather", content=dict(DEFAULT_WEATHER_LOCATION), width=270, height=150)
+        elif chosen_type == "spotify":
+            world.add_box(new_id, x, y, window_type="spotify", width=150, height=205)
         else:
             world.add_box(new_id, x, y, window_type=chosen_type, width=120, height=120)
 
@@ -139,7 +143,7 @@ async def handle_message(websocket, data):
         world.resize_box(data["obj_id"], data["factor"])
 
     elif kind == "set_size":
-        world.set_size(data["obj_id"], float(data["w"]), float(data["h"]))
+        world.set_size(data["obj_id"], float(data["w"]), float(data["h"]), keep_top_left=False)
 
     elif kind == "set_location":
         obj_id = data["obj_id"]
@@ -158,6 +162,38 @@ async def handle_message(websocket, data):
         task = asyncio.create_task(handle_chat(data["obj_id"], data["text"]))
         background_tasks.add(task)
         task.add_done_callback(background_tasks.discard)
+
+    elif kind == "spotify":
+        task = asyncio.create_task(spotify_action(data.get("action")))   # in the background, like chat
+        background_tasks.add(task)
+        task.add_done_callback(background_tasks.discard)
+
+async def broadcast_json(obj):
+    msg = json.dumps(obj)
+    for ws in list(clients):
+        try:
+            await ws.send_text(msg)
+        except Exception:
+            pass
+
+
+async def spotify_action(action):
+    try:
+        await spotify.control(action)
+        await asyncio.sleep(0.4)   # give Spotify a moment, then show the new state right away
+        await broadcast_json({"type": "spotify", **(await spotify.now_playing())})
+    except Exception as e:
+        print("spotify action error:", e)
+
+async def spotify_loop():
+    # only asks Spotify while a page is open and a Spotify widget exists
+    while True:
+        if clients and "spotify" in world.types.values():
+            try:
+                await broadcast_json({"type": "spotify", **(await spotify.now_playing())})
+            except Exception as e:
+                print("spotify poll error:", e)
+        await asyncio.sleep(3)
 
 async def physics_loop():
     
@@ -181,3 +217,4 @@ async def physics_loop():
 @app.on_event("startup")
 async def startup():
     asyncio.create_task(physics_loop())
+    asyncio.create_task(spotify_loop())

@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 .env
 client/fonts/
+server/spotify_secrets.json
+server/spotify_token.json

@@ -9,6 +9,7 @@ SIZE_LIMITS = {
     "note":    (120, 150, 500, 500, False),
     "chat":    (160, 220, 450, 580, False),
     "weather": (200, 111, 540, 300, True),   # same 1.8 shape all the way down
+    "spotify": (100, 137, 300, 410, True),
 }
 DEFAULT_LIMITS = (60, 60, 400, 400, False)
 

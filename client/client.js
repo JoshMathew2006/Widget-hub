@@ -285,7 +285,7 @@ function updatePinchState(hand) {
         }
     } else {
         pinchMinR = Math.min(pinchMinR, r);
-        const holding = pinchAction === "grab" && draggingId !== null;
+        const holding = (pinchAction === "grab" && draggingId !== null) || pinchAction === "uidrag";
         const reopened = holding
             ? r > GRAB_RELEASE_GAP                                   // grabs: fingers clearly open
             : r > PINCH_EXIT || r - pinchMinR >= RELEASE_RISE;       // clicks: quick backoff, unchanged
@@ -328,7 +328,7 @@ function remapRange(value, inMin, inMax, outMin, outMax) {
 
 function getCursorPosition(hand){
     const smoothedRaw = getSmoothedRawPosition(hand);
-    const xRemapped = remapRange(smoothedRaw.x , 0.15, 0.85, 0, 1);
+    const xRemapped = remapRange(smoothedRaw.x , 0.18, 0.82, 0, 1);
     const yRemapped = remapRange(smoothedRaw.y, 0.22, 0.70, 0, 1);
 
     const screenX = (1 - xRemapped) * canvas.width;
@@ -830,6 +830,153 @@ function cleanupRemovedWeather() {
     }
 }
 
+// ---------- Spotify widget (round) ----------
+let spotifyEditors = {};
+let spotifyState = { connected: false };   // the server pushes this every few seconds
+const SPOTIFY_SPIN = false;                 // album art turns slowly like a record while playing
+
+const spStyle = document.createElement("style");
+spStyle.textContent = "@keyframes spSpin { to { transform: rotate(360deg); } }";
+document.head.appendChild(spStyle);
+
+const SP_ICONS = {
+    previous: `<path d="M6 5v14" fill="none" stroke-width="2.2"/><path d="M19 5l-10 7 10 7z"/>`,
+    next:     `<path d="M18 5v14" fill="none" stroke-width="2.2"/><path d="M5 5l10 7-10 7z"/>`,
+    play:     `<path d="M8 4.5v15l12-7.5z"/>`,
+    pause:    `<path d="M7 4.5h3.5v15H7zM13.5 4.5H17v15h-3.5z"/>`,
+};
+function spIcon(name) {
+    return `<svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" stroke-linecap="round" style="width:100%; height:100%; display:block; pointer-events:none">${SP_ICONS[name]}</svg>`;
+}
+
+function ensureSpotifyWidget(obj_id) {
+    if (spotifyEditors[obj_id]) return spotifyEditors[obj_id];
+
+    // the physics box is a rectangle; the disc is the biggest circle that fits inside it
+    const wrapper = makeDiv(`
+        position: absolute; pointer-events: none;
+        display: flex; align-items: center; justify-content: center;
+        container-type: size; user-select: none; font-family: 'Chakra Petch', sans-serif;`);
+    const disc = makeDiv(`
+        position: relative; flex: none; box-sizing: border-box;
+        width: min(100cqw, 100cqh); height: min(100cqw, 100cqh);
+        border-radius: 50%; overflow: hidden; pointer-events: auto;
+        container-type: size; color: #fff; background: #111;`);
+
+    const art = document.createElement("img");
+    art.alt = "";
+    art.style.cssText = `position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover;
+        border-radius: 50%; animation: spSpin 30s linear infinite; animation-play-state: paused;
+        will-change: transform;`;
+    const shade = makeDiv(`position: absolute; inset: 0; border-radius: 50%;
+        background: radial-gradient(circle, rgba(0,0,0,0.30) 0%, rgba(0,0,0,0.50) 55%, rgba(0,0,0,0.78) 100%);`);
+
+    // progress ring around the edge
+    const ringWrap = makeDiv("position: absolute; inset: 0; pointer-events: none;");
+    ringWrap.innerHTML = `
+        <svg viewBox="0 0 100 100" style="width:100%; height:100%; display:block; transform: rotate(-90deg)">
+            <circle cx="50" cy="50" r="47.5" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.25"/>
+            <circle class="fill" cx="50" cy="50" r="47.5" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" pathLength="100" stroke-dasharray="0 100"/>
+        </svg>`;
+    const ringFill = ringWrap.querySelector(".fill");
+
+    // everything shown once connected
+    const content = makeDiv("position: absolute; inset: 0;");
+    const controls = makeDiv(`position: absolute; inset: 0;
+        display: flex; align-items: center; justify-content: center; gap: 6cqw;`);
+    function makeBtn(action, big) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.dataset.action = action;
+        const size = big ? 26 : 17;
+        b.style.cssText = `flex: none; width: ${size}cqw; height: ${size}cqw; padding: ${big ? 6.5 : 4.5}cqw;
+            border-radius: 50%; border: 2px solid rgba(255,255,255,0.85);
+            background: rgba(0,0,0,0.45);
+            color: #fff; cursor: pointer; line-height: 0; transition: transform 0.15s ease;`;
+        b.innerHTML = spIcon(action);
+        b.addEventListener("click", (e) => {
+            e.stopPropagation();
+            ws.send(JSON.stringify({ type: "spotify", action: b.dataset.action }));
+        });
+        return b;
+    }
+    const prevBtn = makeBtn("previous", false);
+    const playBtn = makeBtn("play", true);
+    const nextBtn = makeBtn("next", false);
+    controls.append(prevBtn, playBtn, nextBtn);
+
+    const text = makeDiv(`position: absolute; left: 20%; right: 20%; top: 66%;
+        text-align: center; text-shadow: 0 1px 4px rgba(0,0,0,0.7);`);
+    const titleEl  = makeDiv("font-size: 7cqw; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;");
+    const artistEl = makeDiv("font-size: 5cqw; opacity: 0.85; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;");
+    text.append(titleEl, artistEl);
+    content.append(controls, text);
+
+    // one-time login (do this one with the mouse: browsers block pop-ups from hand clicks)
+    const connectBtn = document.createElement("button");
+    connectBtn.type = "button";
+    connectBtn.textContent = "Connect Spotify";
+    connectBtn.style.cssText = `position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+        padding: 4cqw 7cqw; font: inherit; font-size: 6cqw; white-space: nowrap;
+        border-radius: 99px; border: 2px solid #fff; background: rgba(0,0,0,0.35); color: #fff; cursor: pointer;`;
+    connectBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        window.open("http://127.0.0.1:8000/spotify/login", "_blank");
+    });
+
+    disc.append(art, shade, ringWrap, content, connectBtn);
+    wrapper.append(disc);
+    document.getElementById("noteContainer").appendChild(wrapper);
+
+    disc.addEventListener("mousedown", (e) => {
+        if (e.target.closest("button")) return;   // pressing a button shouldn't start a drag
+        draggingId = obj_id;
+        selectedId = obj_id;
+        e.stopPropagation();
+    });
+
+    const entry = { wrapper, disc, art, ringWrap, ringFill, content, titleEl, artistEl, playBtn, connectBtn, lastKey: null };
+    spotifyEditors[obj_id] = entry;
+    return entry;
+}
+
+function updateSpotifyWidget(entry) {
+    const s = spotifyState;
+    entry.connectBtn.style.display = s.connected ? "none" : "";
+    entry.content.style.display = s.connected ? "" : "none";
+    entry.ringWrap.style.display = s.connected ? "" : "none";
+    if (!s.connected) { entry.art.style.visibility = "hidden"; return; }
+
+    const key = `${s.track}|${s.artist}|${s.art}|${s.playing}`;
+    if (entry.lastKey !== key) {   // only touch the page when something changed
+        entry.titleEl.textContent = s.track || "Nothing playing";
+        entry.artistEl.textContent = s.track ? s.artist : "Start Spotify on any device";
+        if (s.art) { entry.art.src = s.art; entry.art.style.visibility = ""; }
+        else entry.art.style.visibility = "hidden";
+        entry.art.style.animationPlayState = (s.playing && SPOTIFY_SPIN) ? "running" : "paused";
+        entry.playBtn.dataset.action = s.playing ? "pause" : "play";
+        entry.playBtn.innerHTML = spIcon(s.playing ? "pause" : "play");
+        entry.lastKey = key;
+    }
+    // the ring moves smoothly between the server's updates
+    const elapsed = s.playing ? performance.now() - s.receivedAt : 0;
+    const p = s.duration ? Math.min(1, (s.progress + elapsed) / s.duration) : 0;
+    const dash = `${(p * 100).toFixed(1)} 100`;   // a 4-minute song only moves this a few times a second
+    if (entry.lastDash !== dash) {
+        entry.ringFill.setAttribute("stroke-dasharray", dash);
+        entry.lastDash = dash;
+    }
+}
+
+function cleanupRemovedSpotify() {
+    for (const id in spotifyEditors) {
+        if (!latestState[id]) {
+            spotifyEditors[id].wrapper.remove();
+            delete spotifyEditors[id];
+        }
+    }
+}
+
 function ensureNoteEditor(obj_id) {
     if (noteEditors[obj_id]) return noteEditors[obj_id].quill;
 
@@ -943,8 +1090,12 @@ function handleMessage(event) {
                 return;
             }
         }
+        if (lockedIds.has(data.obj_id)) { selectedId = data.obj_id; return; }   // locked: select, don't move
         draggingId = data.obj_id;
         selectedId = data.obj_id;
+    }
+    else if (data.type === "spotify") {
+        spotifyState = { ...data, receivedAt: performance.now() };
     }
     else if (data.type === "theme") {
         bgPicker.color.hexString = data.bg;
@@ -1000,7 +1151,7 @@ function cleanupRemovedChats(){
 
 function raiseWidget(id) {
     if (id === null) return;
-    const entry = noteEditors[id] || chatEditors[id] || weatherEditors[id];
+    const entry = noteEditors[id] || chatEditors[id] || weatherEditors[id] || spotifyEditors[id];
     const container = document.getElementById("noteContainer");
     if (entry && container.lastElementChild !== entry.wrapper) container.appendChild(entry.wrapper);
 }
@@ -1061,6 +1212,8 @@ function pickLockedHand(landmarks) {
     return best;
 }
 
+const OVERLAY_TYPES = new Set(["note", "chat", "weather", "spotify"]);   // drawn as page elements, not canvas boxes
+
 function draw() {
 
     frameCount++;
@@ -1115,7 +1268,9 @@ function draw() {
             dragStarted = false;
             const back = cursorAt(CLICK_LOOKBACK_MS);
             const stable = back && Math.hypot(back.x - smoothedScreenPos.x, back.y - smoothedScreenPos.y) < 140;
-            const clickPos = stable ? back : smoothedScreenPos;   // moving fast: grab what's under the cursor now
+            let clickPos = stable ? back : smoothedScreenPos;     // moving fast: grab what's under the cursor now
+            const isButton = p => { const u = uiAt(p.x, p.y); return !!(u.clickable || u.draggable); };
+            if (!isButton(clickPos) && isButton(smoothedScreenPos)) clickPos = smoothedScreenPos;   // small buttons: don't let the lookback miss them
             console.log("  drift", back ? Math.round(Math.hypot(back.x - smoothedScreenPos.x, back.y - smoothedScreenPos.y)) : "n/a", stable ? "(used earlier spot)" : "(used current spot)");
             pinchAction = gestureClickAt(clickPos.x, clickPos.y, smoothedScreenPos);
             console.log("  ->", pinchAction);
@@ -1168,6 +1323,7 @@ function draw() {
 
     cleanupRemovedNotes();
     cleanupRemovedWeather();
+    cleanupRemovedSpotify();
     cleanupRemovedChats();
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.save();
@@ -1181,11 +1337,11 @@ function draw() {
         ctx.rotate(obj.angle);
         ctx.scale(1 / getScaleX(), 1 / getScaleY());
 
-        if (obj.type !== "note" && obj.type !== "chat" && obj.type !== "weather") {
+        if (!OVERLAY_TYPES.has(obj.type)) {
             drawBox(halfW, halfH, id === hoveredId);
         }
 
-        if (id === selectedId && obj.type !== "note" && obj.type !== "chat" && obj.type !== "weather") {
+        if (id === selectedId && !OVERLAY_TYPES.has(obj.type)) {
             ctx.shadowColor = "#FFFFFF";
             ctx.shadowBlur = 20;
             ctx.strokeStyle = "#FFFFFF";
@@ -1274,6 +1430,19 @@ function draw() {
             }
             maybeFetchWeather(entry, obj.content);
         }
+        else if (obj.type === "spotify") {
+            const entry = ensureSpotifyWidget(id);
+            placeWidget(entry, obj);
+
+            const outlineColor = (id === selectedId) ? "#FFFFFF" : (id === hoveredId ? bgColor : bodyColor);
+            if (entry.lastOutline !== outlineColor) {
+                entry.disc.style.border = `2px solid ${outlineColor}`;
+                entry.disc.style.boxShadow = `0 0 20px ${outlineColor}, 0 0 10px ${outlineColor}`;
+                entry.ringWrap.style.color = bodyColor;
+                entry.lastOutline = outlineColor;
+            }
+            updateSpotifyWidget(entry);
+        }
 
 
     }
@@ -1283,10 +1452,16 @@ function draw() {
     ctx.shadowBlur = 0;
 
     const cursorEl = document.getElementById("gestureCursorEl");
+    let cursorDrawPos = gestureCursor;
+    if (resizeId !== null && gestureCursor) {
+        // while resizing, the cursor sits on the resize button until you let go
+        const r = resizeHandle.getBoundingClientRect();
+        cursorDrawPos = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    }
     if(gestureCursor){
         cursorEl.style.display = "block";
-        cursorEl.style.left = `${gestureCursor.x - 12}px`;
-        cursorEl.style.top = `${gestureCursor.y - 12}px`;
+        cursorEl.style.left = `${cursorDrawPos.x - 12}px`;
+        cursorEl.style.top = `${cursorDrawPos.y - 12}px`;
         cursorEl.style.borderColor = bodyColor;  
     } else {
         cursorEl.style.display = "none";
@@ -1294,6 +1469,7 @@ function draw() {
 
     updateHub();
     updateTrash();
+    updateWidgetMenu();
     updateGestureHover();
     requestAnimationFrame(draw);
 }
@@ -1438,7 +1614,7 @@ canvas.addEventListener("mousedown", (e) => {
 
 document.addEventListener("mousemove", (e) => {
     if (inputMode !== "mouse") return;
-    if (draggingId === null) return;
+    if (draggingId === null || lockedIds.has(draggingId)) return;
 
     const rect = canvas.getBoundingClientRect();
     const worldX = (e.clientX - rect.left) / getScaleX();
@@ -1587,7 +1763,7 @@ function updateHub() {
 
     const nearCenter = points.some(p => Math.hypot(p.x - cx, p.y - cy) < HUB_CLOSED_REACH);
     const insideMenu = points.some(p => ((p.x - cx) / HUB_OPEN_RX) ** 2 + ((p.y - cy) / HUB_OPEN_RY) ** 2 < 1);
-    const blocked = draggingId !== null || trashActive;
+    const blocked = draggingId !== null || trashActive || resizeId !== null || menuId !== null || cursorOverHandle();
 
     if (!hubOpen) {
         if (nearCenter && !blocked) {
@@ -1647,10 +1823,10 @@ function updateTrash() {
     if (!inside) trashLocked = false;
 
     const target = draggingId !== null ? draggingId : selectedId;
-    const targetOk = target !== null && !!latestState[target];
+    const targetOk = target !== null && !!latestState[target] && !lockedIds.has(target);
 
     if (!trashActive) {
-        if (inside && targetOk && !trashLocked && !hubOpen) {
+        if (inside && targetOk && !trashLocked && !hubOpen && resizeId === null && !cursorOverHandle()) {
             trashTarget = target;
             trashStart = now;
             trashLeftAt = 0;
@@ -1679,6 +1855,147 @@ function updateTrash() {
     }
     trashFill.setAttribute("stroke-dasharray", `${(p * 100).toFixed(1)} 100`);
 }
+
+// ---------- Widget menu: point at a widget to get lock + resize ----------
+const MENU_DWELL_MS = 300;         // point this long before the buttons appear
+const MENU_CLOSE_DELAY_MS = 400;   // grace time when the cursor slips off
+const MENU_REACH = 32 + 68 + 10;   // line + button + margin (px), for flipping to the left side
+const KEEP_ASPECT = new Set(["box", "weather", "spotify"]);   // must match keep_aspect in physics.py
+
+const widgetMenu = document.getElementById("widgetMenu");
+const focusDim = document.getElementById("focusDim");
+const lockBtn = document.getElementById("lockBtn");
+const resizeHandle = document.getElementById("resizeHandle");
+const lockedIds = new Set();
+
+let menuId = null;          // widget whose buttons are showing
+let menuCloseAt = 0;
+let hoverId = null, hoverSince = 0;
+let resizeId = null;        // widget being resized right now
+let resizeStart = null;
+
+function pointerPoints() {
+    const points = [];
+    if (inputMode === "mouse") points.push(mouseClient);
+    if (gestureCursor) points.push(gestureCursor);
+    return points;
+}
+
+function widgetAt(p) {      // topmost widget under a screen point
+    const w = screenToWorld(p);
+    let hit = null;
+    for (const id in latestState) {
+        const o = latestState[id];
+        if (Math.abs(w.x - o.x) <= o.size[0] / 2 && Math.abs(w.y - o.y) <= o.size[1] / 2) hit = id;   // later = on top
+    }
+    return hit;
+}
+
+function widgetScreenRect(obj) {   // where a widget is drawn on screen (the disc, for round ones)
+    const sx = getScaleX(), sy = getScaleY();
+    const w = obj.size[0] * sx, h = obj.size[1] * sy;
+    const left = (obj.x - obj.size[0] / 2) * sx, top = (obj.y - obj.size[1] / 2) * sy;
+    if (obj.type !== "spotify") return { left, top, width: w, height: h, round: false };
+    const d = Math.min(w, h);      // biggest circle that fits in the box
+    return { left: left + (w - d) / 2, top: top + (h - d) / 2, width: d, height: d, round: true };
+}
+
+function cursorOverHandle() {   // over any part of the widget menu
+    return pointerPoints().some(p => document.elementFromPoint(p.x, p.y)?.closest("#widgetMenu"));
+}
+
+lockBtn.addEventListener("click", (e) => {
+    if (menuId === null) return;
+    if (lockedIds.has(menuId)) lockedIds.delete(menuId);
+    else lockedIds.add(menuId);
+    e.stopPropagation();
+});
+
+resizeHandle.addEventListener("pointerdown", (e) => {
+    const obj = latestState[menuId];
+    if (!obj || lockedIds.has(menuId)) return;
+    resizeId = menuId;
+    resizeStart = {
+        x: e.clientX, y: e.clientY, w: obj.size[0], h: obj.size[1],
+        dir: widgetMenu.classList.contains("flip") ? -1 : 1,   // menu on the left: moving left grows it
+        keep: KEEP_ASPECT.has(obj.type),
+    };
+    e.preventDefault();
+    e.stopPropagation();
+});
+
+document.addEventListener("pointermove", (e) => {
+    if (resizeId === null) return;
+    if (!latestState[resizeId]) { resizeId = null; return; }
+    const s = resizeStart;
+    const dx = (e.clientX - s.x) / getScaleX() * s.dir;   // outward = bigger
+    const dy = (e.clientY - s.y) / getScaleY();           // up = bigger
+    let w = s.w + 2 * dx, h = s.h - 2 * dy;               // x2: both sides move, it grows from the center
+    if (s.keep) {
+        // one scale for both sides, taken from whichever direction you moved more
+        const sw = Math.max(0.05, w / s.w), sh = Math.max(0.05, h / s.h);
+        const k = Math.abs(Math.log(sw)) > Math.abs(Math.log(sh)) ? sw : sh;
+        w = s.w * k; h = s.h * k;
+    }
+    ws.send(JSON.stringify({ type: "set_size", obj_id: resizeId, w, h }));
+});
+
+document.addEventListener("pointerup", () => { resizeId = null; });
+
+function updateWidgetMenu() {
+    const now = performance.now();
+    const points = pointerPoints();
+    const blocked = hubOpen || trashActive;
+
+    const under = points.length ? widgetAt(points[0]) : null;
+    if (under !== hoverId) { hoverId = under; hoverSince = now; }
+
+    if (resizeId !== null) {
+        menuId = resizeId;
+    } else if (blocked || draggingId !== null) {
+        menuId = null;                                        // no buttons while dragging
+    } else {
+        const onMenu = cursorOverHandle();
+        if (menuId !== null && (hoverId === menuId || onMenu)) menuCloseAt = now + MENU_CLOSE_DELAY_MS;
+        if (hoverId !== null && hoverId !== menuId && !onMenu && now - hoverSince >= MENU_DWELL_MS) {
+            menuId = hoverId;                                 // rested on a widget long enough
+            menuCloseAt = now + MENU_CLOSE_DELAY_MS;
+        }
+        if (menuId !== null && (now > menuCloseAt || !latestState[menuId])) menuId = null;
+    }
+
+    // subtle dim around whatever you're working with (hovering, dragging or resizing)
+    const sx = getScaleX(), sy = getScaleY();
+    const focusId = draggingId ?? resizeId ?? menuId;
+    const focus = focusId !== null && !blocked ? latestState[focusId] : null;
+    focusDim.classList.toggle("show", !!focus);
+    if (focus) {
+        const r = widgetScreenRect(focus);
+        focusDim.style.left   = `${r.left}px`;
+        focusDim.style.top    = `${r.top}px`;
+        focusDim.style.width  = `${r.width}px`;
+        focusDim.style.height = `${r.height}px`;
+        focusDim.style.borderRadius = r.round ? "50%" : "8px";
+    }
+
+    const obj = menuId !== null ? latestState[menuId] : null;
+    widgetMenu.classList.toggle("show", !!obj);
+    if (!obj) return;
+    const r = widgetScreenRect(obj);
+    const left = r.left, right = r.left + r.width;
+    const flip = resizeId !== null
+        ? widgetMenu.classList.contains("flip")               // don't switch sides mid-resize
+        : right + MENU_REACH > canvas.width;
+    widgetMenu.classList.toggle("flip", flip);
+    widgetMenu.classList.toggle("locked", lockedIds.has(menuId));
+    widgetMenu.style.left = `${flip ? left : right}px`;
+    widgetMenu.style.top  = `${r.round ? r.top + r.height / 2 - 87 : r.top}px`;   // round: buttons centered on the side
+    widgetMenu.style.setProperty("--line", bodyColor);
+    widgetMenu.style.setProperty("--btn", buttonColor);
+    widgetMenu.style.setProperty("--bg", bgColor);
+}
+
+
 
 document.querySelectorAll("#inputToggle button").forEach(btn => {
     btn.addEventListener("click", () => {
