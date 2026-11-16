@@ -56,6 +56,10 @@ async def save_theme():
         json.dump(theme, f)
     return theme
 
+@app.get("/status")            # is anyone looking at the dashboard right now?
+async def status():
+    return {"pages_open": len(clients), "theme": theme}
+
 
 background_tasks = set()   # keeps running chat replies from being garbage-collected
 
@@ -74,104 +78,86 @@ async def handle_chat(obj_id, user_text):
         reply = "(M1L0 couldn't be reached. Is Ollama running?)"
     world.append_chat_message(obj_id, "assistant", reply)
 
-@app.websocket("/ws")
 
+@app.websocket("/ws")
 async def ws_endpoint(websocket: WebSocket):
     await websocket.accept()
     clients.add(websocket)
-
     try:
         await websocket.send_text(json.dumps({"type": "theme", **theme}))
         while True:
             msg = await websocket.receive_text()
-            data = json.loads(msg)
-            if(data["type"] == "hit_test"):
-                print(f"hit_test at ({data['x']}, {data['y']})")
-                found_body = world.get_body_at(data["x"], data["y"])
-                if found_body is not None:
-                    
-                    await websocket.send_text(json.dumps({
-                        
-                        "type": "hit_test_result",
-                        "obj_id": found_body
-                    
-                    }));
-                
-                else:
-                    
-                    await websocket.send_text(json.dumps({
-                        
-                        "type": "hit_test_result",
-                        
-                        "obj_id": None
-                    
-                    }));
-            
-            elif(data["type"] == "drag"):
-
-                world.bring_to_front(data["obj_id"])
-                world.set_position(data["obj_id"], data["x"], data["y"])
-            
-            elif(data["type"] == "resize"):
-            
-                found_body = world.get_body_at(data["x"], data["y"])
-                if found_body is not None:
-                    world.resize_box(found_body, data["factor"])
-            
-            elif(data["type"] == "spawn"):
-                
-                global box_counter
-                box_counter += 1
-                new_id = f"box{box_counter}"
-                chosen_type = data.get("window_type", "box")
-                spawn_y = WORLD_HEIGHT / 3
-                if chosen_type == "note":
-
-                    world.add_box(new_id, WORLD_WIDTH / 2, spawn_y, window_type="note", content="", width=350, height=250)
-                
-                elif chosen_type == "chat":
-
-                    
-                    world.add_box(new_id, WORLD_WIDTH / 2, spawn_y, window_type="chat", content=[], width=350, height=400)
-                
-                elif chosen_type == "weather":
-
-                    world.add_box(new_id, WORLD_WIDTH / 2, spawn_y, window_type="weather",content=dict(DEFAULT_WEATHER_LOCATION), width=360, height=200)
-                else:
-                    
-                    world.add_box(new_id, WORLD_WIDTH / 2, spawn_y, window_type=chosen_type, width=120, height=120)
-            
-            elif(data["type"] == "remove"):
-                
-                world.remove_box(data["obj_id"])
-            
-            elif(data["type"] == "resize_by_id"):
-                
-                world.resize_box(data["obj_id"], data["factor"])
-
-            elif(data["type"] == "set_location"):
-
-                obj_id = data["obj_id"]
-                if world.types.get(obj_id) == "weather":
-                    world.set_content(obj_id, {
-                        "label": str(data.get("label", "Your Location"))[:40],
-                        "lat": float(data["lat"]),
-                        "lon": float(data["lon"]),
-                    })
-
-            elif(data["type"] == "theme"):
-                theme.update(clean_theme(data))
-                await broadcast_theme(skip=websocket)
-            
-            elif(data["type"] == "chat_message"):
-                task = asyncio.create_task(handle_chat(data["obj_id"], data["text"]))
-                background_tasks.add(task)
-                task.add_done_callback(background_tasks.discard)
-            
-
+            try:
+                await handle_message(websocket, json.loads(msg))
+            except Exception as e:
+                print(f"bad message {msg[:80]}: {e}")   # skip it, keep the connection
     except Exception as e:
-        print(f"error in websocket: {e}")
+        print(f"websocket closed: {e}")
+    finally:
         clients.discard(websocket)
+
+
+async def handle_message(websocket, data):
+    global box_counter
+    kind = data["type"]
+
+    if kind == "hit_test":
+        print(f"hit_test at ({data['x']}, {data['y']})")
+        found_body = world.get_body_at(data["x"], data["y"])
+        await websocket.send_text(json.dumps({
+            "type": "hit_test_result",
+            "obj_id": found_body,          # None if nothing was there
+        }))
+
+    elif kind == "drag":
+        world.bring_to_front(data["obj_id"])
+        world.set_position(data["obj_id"], data["x"], data["y"])
+
+    elif kind == "resize":
+        found_body = world.get_body_at(data["x"], data["y"])
+        if found_body is not None:
+            world.resize_box(found_body, data["factor"])
+
+    elif kind == "spawn":
+        box_counter += 1
+        new_id = f"box{box_counter}"
+        chosen_type = data.get("window_type", "box")
+        x, y = WORLD_WIDTH / 2, WORLD_HEIGHT / 3
+        if chosen_type == "note":
+            world.add_box(new_id, x, y, window_type="note", content="", width=160, height=220)
+        elif chosen_type == "chat":
+            world.add_box(new_id, x, y, window_type="chat", content=[], width=190, height=260)
+        elif chosen_type == "weather":
+            world.add_box(new_id, x, y, window_type="weather", content=dict(DEFAULT_WEATHER_LOCATION), width=270, height=150)
+        else:
+            world.add_box(new_id, x, y, window_type=chosen_type, width=120, height=120)
+
+    elif kind == "remove":
+        world.remove_box(data["obj_id"])
+
+    elif kind == "resize_by_id":
+        world.resize_box(data["obj_id"], data["factor"])
+
+    elif kind == "set_size":
+        world.set_size(data["obj_id"], float(data["w"]), float(data["h"]))
+
+    elif kind == "set_location":
+        obj_id = data["obj_id"]
+        if world.types.get(obj_id) == "weather":
+            world.set_content(obj_id, {
+                "label": str(data.get("label", "Your Location"))[:40],
+                "lat": float(data["lat"]),
+                "lon": float(data["lon"]),
+            })
+
+    elif kind == "theme":
+        theme.update(clean_theme(data))
+        await broadcast_theme(skip=websocket)
+
+    elif kind == "chat_message":
+        task = asyncio.create_task(handle_chat(data["obj_id"], data["text"]))
+        background_tasks.add(task)
+        task.add_done_callback(background_tasks.discard)
 
 async def physics_loop():
     

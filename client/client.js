@@ -20,6 +20,8 @@ const TAP_DROP = 0.24;
 const TAP_MAX = 0.24;
 const RELEASE_RISE = 0.07;
 const GRAB_RELEASE_GAP = 0.25;
+const GRAB_RELEASE_MS = 200;   // a drag only ends after the hand stays open this long
+let reopenSince = 0;
 
 let ratioHistory = [];
 let pinchMinR = Infinity;
@@ -114,7 +116,7 @@ function loadHandLandmarker() {
                     delegate: "GPU"
                 },
                 runningMode: "VIDEO",
-                numHands: 1
+                numHands: 2
             });
         })();
         landmarkerLoading.catch(() => { landmarkerLoading = null; }); // allow a retry
@@ -229,7 +231,7 @@ function updatePointingState(hand){
     return pointingFrameCount >= POINTING_CONFIRM_FRAMES;
 }
 
-const PINCH_ENTER = 0.15;
+const PINCH_ENTER = 0.19;
 const PINCH_INDEX_MIN = 0;   //pointer finger extension value for pinches
 const PINCH_EXIT = 0.35;
 const PINCH_CONFIRM = 1;
@@ -278,7 +280,7 @@ function updatePinchState(hand) {
                 "| reach " + reachNow.toFixed(2) + (gateOk ? " ok" : " too bent, need >=" + PINCH_INDEX_MIN));
         }
         if (pinchCounter >= PINCH_CONFIRM) {
-            pinchActive = true; pinchCounter = 0; pinchMinR = r;
+            pinchActive = true; pinchCounter = 0; pinchMinR = r; reopenSince = 0;
             console.log(`PINCH ON  gap ${r.toFixed(2)} ${fullyClosed ? "(closed)" : "(flick)"}`);
         }
     } else {
@@ -287,8 +289,13 @@ function updatePinchState(hand) {
         const reopened = holding
             ? r > GRAB_RELEASE_GAP                                   // grabs: fingers clearly open
             : r > PINCH_EXIT || r - pinchMinR >= RELEASE_RISE;       // clicks: quick backoff, unchanged
-        pinchCounter = reopened ? pinchCounter + 1 : 0;
-        if (pinchCounter >= (holding ? 2 : RELEASE_CONFIRM)) {
+                pinchCounter = reopened ? pinchCounter + 1 : 0;
+        if (!reopened) reopenSince = 0;
+        else if (!reopenSince) reopenSince = now;
+        const released = holding
+            ? reopened && now - reopenSince >= GRAB_RELEASE_MS   // drags: must stay open, ignores blur
+            : pinchCounter >= RELEASE_CONFIRM;                   // clicks: unchanged
+        if (released) {
             console.log(`PINCH OFF gap ${r.toFixed(2)} min ${pinchMinR.toFixed(2)} rise ${(r - pinchMinR).toFixed(2)} ${holding ? "grab" : "tap"} after ${Math.round(now - pinchStartTime)}ms`);
             pinchActive = false; pinchCounter = 0; ratioHistory = [];
         }
@@ -1011,14 +1018,58 @@ function placeWidget(entry, obj) {
     entry.lastPlace = key;
 }
 
+// ---- Hand lock: follow one hand, ignore everyone else ----
+const LOCK_RELEASE_MS = 500;   // lock drops if your hand is gone this long
+const LOCK_MAX_JUMP = 0.25;    // a hand farther than this from the last spot isn't yours (0-1 of the camera frame)
+const MIN_HAND_SIZE = 0.06;    // hands smaller than this (far away, background) are ignored
+let lockPos = null;            // where the locked hand's wrist was last seen
+let lockSeenAt = 0;
+
+function lockHandSize(lm) {    // wrist to middle knuckle on screen, gets bigger as the hand gets closer
+    return Math.hypot(lm[0].x - lm[9].x, lm[0].y - lm[9].y);
+}
+
+function pickLockedHand(landmarks) {
+    const now = performance.now();
+    if (lockPos && now - lockSeenAt > LOCK_RELEASE_MS) {
+        console.log("hand lock released");
+        lockPos = null;
+    }
+
+    let best = -1;
+    if (lockPos) {
+        // locked: take the hand nearest where yours just was
+        let bestDist = draggingId !== null ? LOCK_MAX_JUMP * 2 : LOCK_MAX_JUMP;   // fast drags move farther per frame
+        landmarks.forEach((lm, i) => {
+            const d = Math.hypot(lm[0].x - lockPos.x, lm[0].y - lockPos.y);
+            if (d < bestDist) { bestDist = d; best = i; }
+        });
+    } else {
+        // not locked: take the biggest (closest) hand
+        let bestSize = MIN_HAND_SIZE;
+        landmarks.forEach((lm, i) => {
+            const s = lockHandSize(lm);
+            if (s > bestSize) { bestSize = s; best = i; }
+        });
+        if (best !== -1) console.log("hand lock acquired, size", lockHandSize(landmarks[best]).toFixed(3));
+    }
+
+    if (best !== -1) {
+        lockPos = { x: landmarks[best][0].x, y: landmarks[best][0].y };
+        lockSeenAt = now;
+    }
+    return best;
+}
+
 function draw() {
 
     frameCount++;
     let newDetection = false;
     if (inputMode === "hand" && handLandmarker && handStream && webcamVideo.readyState >= 2 && frameCount % DETECT_EVERY_N_FRAMES === 0){
         const results = handLandmarker.detectForVideo(webcamVideo, performance.now());
-        latestHandLandmarks = results.landmarks;
-        latestWorldLandmarks = results.worldLandmarks || [];
+        const i = pickLockedHand(results.landmarks);
+        latestHandLandmarks = i === -1 ? [] : [results.landmarks[i]];
+        latestWorldLandmarks = i === -1 ? [] : [(results.worldLandmarks || [])[i]].filter(Boolean);
         newDetection = true;
     }
 
@@ -1074,7 +1125,8 @@ function draw() {
                 if (!dragStarted) {
                     const held = performance.now() - pinchStartTime;
                     const moved = Math.hypot(smoothedScreenPos.x - pinchStartPos.x, smoothedScreenPos.y - pinchStartPos.y);
-                    if (held >= DRAG_HOLD_MS || moved >= DRAG_START_DIST) {
+                    const fingersClosed = !reopenSince;   // not counting the release wait as holding
+                    if ((held >= DRAG_HOLD_MS && fingersClosed) || moved >= DRAG_START_DIST) {
                         dragStarted = true;
                         const obj = latestState[draggingId];
                         if (obj) {
@@ -1101,6 +1153,7 @@ function draw() {
         }
         else if (!pinching && wasPinching) {
             if (pinchAction === "uidrag") endUiDrag();
+            if (pinchAction === "grab" && dragStarted) selectedId = null;   // a finished drag deselects
             draggingId = null;
             pinchAction = null;
             dragStarted = false;
